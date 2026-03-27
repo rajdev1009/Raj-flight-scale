@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Block Breaker</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#0a0a1e;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  min-height:100vh; font-family:Arial,sans-serif;
+  overflow:hidden; color:white;
+}
+#topbar {
+  display:flex; gap:16px; margin-bottom:6px;
+  font-size:15px; font-weight:bold;
+}
+.stat {
+  background:rgba(255,255,255,0.1);
+  padding:5px 14px; border-radius:20px;
+  border:1px solid rgba(255,255,255,0.15);
+}
+#coinStat{color:#FFD700;}
+#levelStat{color:#00FFAA;}
+#liveStat{color:#FF6B6B;}
+canvas{display:block;border-radius:10px;border:2px solid #333;}
+#overlay{
+  position:absolute; top:0;left:0;right:0;bottom:0;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  gap:12px; background:rgba(0,0,0,0.8);
+  border-radius:10px; padding:20px; text-align:center;
+}
+#overlay h1{font-size:28px;color:#FFD700;text-shadow:0 0 20px gold;}
+#overlay p{color:#ccc;font-size:13px;line-height:1.8;}
+#overlay .big{font-size:20px;color:#FFD700;font-weight:bold;}
+#startBtn{
+  background:linear-gradient(135deg,#6200EA,#AA00FF);
+  color:white; border:none; padding:12px 36px;
+  font-size:18px; border-radius:30px; cursor:pointer;
+  box-shadow:0 0 20px rgba(170,0,255,0.5); margin-top:8px;
+}
+</style>
+</head>
+<body>
+<div id="topbar">
+  <div class="stat" id="coinStat">💰 0</div>
+  <div class="stat" id="levelStat">⭐ Level 1</div>
+  <div class="stat" id="liveStat">❤️ 3</div>
+  <div class="stat" id="scoreStat">🏆 0</div>
+</div>
+<div style="position:relative;">
+  <canvas id="c"></canvas>
+  <div id="overlay">
+    <h1>🧱 Block Breaker</h1>
+    <p>
+      🖱️ Mouse/Touch se slider chalao<br>
+      👆 Tap karo ball shoot karne ke liye<br><br>
+      🔥 <b>Fire Block</b> — Charon taraf blocks toot jaate<br>
+      🧊 <b>Ice Block</b> — 2 baar maro tab toota<br>
+      🔫 <b>Gun Block</b> — Slider pe gun aa jaati hai<br>
+      💣 <b>Bomb</b> — 20 sec baad girta hai, pakadna mat!
+    </p>
+    <button id="startBtn" onclick="startGame()">▶ KHELO</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const overlay = document.getElementById('overlay');
+
+const CW = Math.min(window.innerWidth - 10, 420);
+const CH = Math.min(window.innerHeight - 100, 640);
+canvas.width = CW; canvas.height = CH;
+
+// ── GAME STATE ──
+let coins, level, lives, score;
+let running = false;
+let gameStarted = false;
+
+// Ball
+let ball = {x:0,y:0,vx:0,vy:0,r:10,active:false,fire:false,fireTimer:0};
+let ballOnSlider = true;
+
+// Slider
+let sliderX = CW/2 - 60;
+const SW = 120, SH = 14, SY = CH - 30;
+
+// Blocks
+let blocks = [];
+const COLS = 7, ROWS = 5;
+const BW = Math.floor((CW - 20) / COLS);
+const BH = 26;
+const BOFF_X = 10, BOFF_Y = 60;
+
+// Bullets (gun ability)
+let bullets = [];
+let gunActive = false, gunTimer = 0;
+
+// Bombs (falling)
+let bombs = [];
+let bombSpawnTimer = 0;
+const BOMB_INTERVAL = 1200; // 20 sec at 60fps
+
+// Effects
+let effects = [];
+let particles = [];
+
+// Input
+let tapQueued = false;
+
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  sliderX = (e.clientX - r.left) - SW/2;
+  clampSlider();
+  if (ballOnSlider) ball.x = sliderX + SW/2;
+});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect();
+  sliderX = (e.touches[0].clientX - r.left) - SW/2;
+  clampSlider();
+  if (ballOnSlider) ball.x = sliderX + SW/2;
+}, {passive:false});
+canvas.addEventListener('click', () => { if(running) tapQueued = true; });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if(running) tapQueued = true;
+}, {passive:false});
+
+function clampSlider(){ sliderX=Math.max(0,Math.min(CW-SW,sliderX)); }
+
+// ── LEVEL SETUP ──
+const BLOCK_TYPES = ['normal','normal','normal','fire','ice','gun','normal'];
+const BLOCK_COLORS = {
+  normal: ['#E53935','#8E24AA','#1E88E5','#43A047','#FB8C00','#00ACC1','#F4511E'],
+  fire:   '#FF6F00',
+  ice:    '#4FC3F7',
+  gun:    '#76FF03',
+};
+
+function buildBlocks() {
+  blocks = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      // Random type weighted
+      let type = 'normal';
+      const rand = Math.random();
+      if (rand < 0.10) type = 'fire';
+      else if (rand < 0.22) type = 'ice';
+      else if (rand < 0.30) type = 'gun';
+
+      let color;
+      if (type === 'normal') color = BLOCK_COLORS.normal[c % BLOCK_COLORS.normal.length];
+      else if (type === 'fire') color = BLOCK_COLORS.fire;
+      else if (type === 'ice') color = BLOCK_COLORS.ice;
+      else color = BLOCK_COLORS.gun;
+
+      blocks.push({
+        x: BOFF_X + c * BW,
+        y: BOFF_Y + r * BH,
+        w: BW - 4, h: BH - 4,
+        type, color,
+        alive: true,
+        hp: type === 'ice' ? 2 : 1,
+        cracked: false,
+        row: r, col: c,
+      });
+    }
+  }
+}
+
+function startGame() {
+  coins = 0; level = 1; lives = 3; score = 0;
+  gunActive = false; gunTimer = 0;
+  bombs = []; bullets = []; effects = []; particles = [];
+  bombSpawnTimer = 0;
+  buildBlocks();
+  resetBall();
+  running = true;
+  gameStarted = true;
+  overlay.style.display = 'none';
+  updateUI();
+  requestAnimationFrame(loop);
+}
+
+function resetBall() {
+  ball.x = sliderX + SW/2;
+  ball.y = SY - ball.r - 2;
+  ball.vx = 0; ball.vy = 0;
+  ball.active = false;
+  ball.fire = false; ball.fireTimer = 0;
+  ballOnSlider = true;
+}
+
+function updateUI() {
+  document.getElementById('coinStat').textContent = `💰 ${coins}`;
+  document.getElementById('levelStat').textContent = `⭐ Lv ${level}`;
+  document.getElementById('liveStat').textContent = `❤️ ${lives}`;
+  document.getElementById('scoreStat').textContent = `🏆 ${score}`;
+}
+
+// ── MAIN LOOP ──
+let lastTime = 0;
+function loop(ts) {
+  if (!running) return;
+  const dt = Math.min((ts - lastTime)/16.67, 3);
+  lastTime = ts;
+
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function update(dt) {
+  // Shoot ball on tap
+  if (tapQueued) {
+    tapQueued = false;
+    if (!ball.active && ballOnSlider) {
+      ballOnSlider = false;
+      ball.active = true;
+      const speed = 4.5 + (level-1)*0.3;
+      const angle = -Math.PI/2 + (Math.random()-0.5)*0.5;
+      ball.vx = Math.cos(angle)*speed;
+      ball.vy = Math.sin(angle)*speed;
+    }
+    // Gun shoots bullets
+    if (gunActive) {
+      bullets.push({x:sliderX+SW*0.25, y:SY-6, vy:-8});
+      bullets.push({x:sliderX+SW*0.75, y:SY-6, vy:-8});
+    }
+  }
+
+  // Bomb spawn every 20 sec
+  bombSpawnTimer++;
+  if (bombSpawnTimer >= BOMB_INTERVAL) {
+    bombSpawnTimer = 0;
+    spawnBomb();
+  }
+
+  // Gun timer
+  if (gunActive) {
+    gunTimer--;
+    if (gunTimer <= 0) { gunActive = false; }
+  }
+
+  // Fire timer on ball
+  if (ball.fire) {
+    ball.fireTimer--;
+    if (ball.fireTimer <= 0) ball.fire = false;
+  }
+
+  // Move ball
+  if (ball.active) {
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+
+    // Wall bounce
+    if (ball.x - ball.r < 0) { ball.x = ball.r; ball.vx = Math.abs(ball.vx); }
+    if (ball.x + ball.r > CW) { ball.x = CW - ball.r; ball.vx = -Math.abs(ball.vx); }
+    if (ball.y - ball.r < 0) { ball.y = ball.r; ball.vy = Math.abs(ball.vy); }
+
+    // Slider bounce
+    if (
+      ball.y + ball.r >= SY && ball.y + ball.r <= SY + SH + 8 &&
+      ball.x >= sliderX - 5 && ball.x <= sliderX + SW + 5 &&
+      ball.vy > 0
+    ) {
+      const hitPos = (ball.x - sliderX) / SW; // 0..1
+      const angle = -Math.PI/2 + (hitPos - 0.5) * Math.PI * 0.6;
+      const speed = Math.sqrt(ball.vx**2 + ball.vy**2);
+      ball.vx = Math.cos(angle) * speed;
+      ball.vy = Math.sin(angle) * speed;
+      ball.y = SY - ball.r - 1;
+    }
+
+    // Ball fell off
+    if (ball.y - ball.r > CH) {
+      lives--;
+      updateUI();
+      addEffect(CW/2, CH/2, '❤️ Life Lost!', '#FF4444', 22);
+      if (lives <= 0) { endGame(); return; }
+      resetBall();
+    }
+
+    // Block collision
+    for (let i = blocks.length-1; i >= 0; i--) {
+      const b = blocks[i];
+      if (!b.alive) continue;
+      if (ballBlockCollide(ball, b)) {
+        hitBlock(i);
+        if (!ball.fire) {
+          // Reflect
+          const overlapX = Math.min(ball.x+ball.r, b.x+b.w) - Math.max(ball.x-ball.r, b.x);
+          const overlapY = Math.min(ball.y+ball.r, b.y+b.h) - Math.max(ball.y-ball.r, b.y);
+          if (overlapX < overlapY) ball.vx *= -1;
+          else ball.vy *= -1;
+        }
+        break;
+      }
+    }
+  } else if (ballOnSlider) {
+    ball.x = sliderX + SW/2;
+    ball.y = SY - ball.r - 2;
+  }
+
+  // Bullets
+  for (let i = bullets.length-1; i >= 0; i--) {
+    bullets[i].y += bullets[i].vy * dt;
+    if (bullets[i].y < 0) { bullets.splice(i,1); continue; }
+    // Bullet-block collision
+    let hit = false;
+    for (let j = blocks.length-1; j >= 0; j--) {
+      const b = blocks[j];
+      if (!b.alive) continue;
+      if (bullets[i] && pointInBlock(bullets[i].x, bullets[i].y, b)) {
+        hitBlock(j);
+        bullets.splice(i,1);
+        hit = true; break;
+      }
+    }
+  }
+
+  // Bombs
+  for (let i = bombs.length-1; i >= 0; i--) {
+    bombs[i].y += 1.5 * dt;
+    // Bomb hits slider
+    if (
+      bombs[i].y + 14 >= SY &&
+      bombs[i].x >= sliderX - 10 &&
+      bombs[i].x <= sliderX + SW + 10
+    ) {
+      lives--;
+      updateUI();
+      addEffect(bombs[i].x, bombs[i].y, '💥 BOOM! -❤️', '#FF0000', 20);
+      spawnParticles(bombs[i].x, bombs[i].y, '#FF6600', 20);
+      bombs.splice(i,1);
+      if (lives <= 0) { endGame(); return; }
+      continue;
+    }
+    // Bomb fell off
+    if (bombs[i].y > CH) { bombs.splice(i,1); }
+  }
+
+  // Check level complete
+  if (blocks.every(b => !b.alive)) {
+    level++;
+    updateUI();
+    addEffect(CW/2, CH/2-30, `⭐ Level ${level}!`, '#FFD700', 26);
+    setTimeout(() => {
+      buildBlocks();
+      resetBall();
+    }, 1500);
+  }
+
+  // Particles
+  for (let i = particles.length-1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += 0.15 * dt;
+    p.life--;
+    if (p.life <= 0) particles.splice(i,1);
+  }
+
+  // Effects
+  for (let i = effects.length-1; i >= 0; i--) {
+    effects[i].life--;
+    if (effects[i].life <= 0) effects.splice(i,1);
+  }
+}
+
+function ballBlockCollide(ball, b) {
+  const nearX = Math.max(b.x, Math.min(ball.x, b.x+b.w));
+  const nearY = Math.max(b.y, Math.min(ball.y, b.y+b.h));
+  const dx = ball.x - nearX, dy = ball.y - nearY;
+  return dx*dx + dy*dy < ball.r*ball.r;
+}
+
+function pointInBlock(x, y, b) {
+  return x>=b.x && x<=b.x+b.w && y>=b.y && y<=b.y+b.h;
+}
+
+function hitBlock(idx) {
+  const b = blocks[idx];
+  if (!b.alive) return;
+
+  if (b.type === 'ice') {
+    if (b.hp === 2) {
+      b.hp = 1; b.cracked = true;
+      // First hit: break 4 surrounding blocks
+      breakSurrounding(b.row, b.col);
+      addEffect(b.x+b.w/2, b.y+b.h/2, '🧊 CRACK!', '#4FC3F7', 14);
+    } else {
+      // Second hit: destroy ice block
+      b.alive = false;
+      spawnParticles(b.x+b.w/2, b.y+b.h/2, '#4FC3F7', 10);
+      gainCoin(b);
+    }
+    return;
+  }
+
+  if (b.type === 'fire') {
+    b.alive = false;
+    // Fire: ball becomes fire for 5 sec, break 4 surrounding
+    ball.fire = true; ball.fireTimer = 300;
+    breakSurrounding(b.row, b.col);
+    addEffect(b.x+b.w/2, b.y+b.h/2, '🔥 FIRE!', '#FF6F00', 16);
+    spawnParticles(b.x+b.w/2, b.y+b.h/2, '#FF6F00', 15);
+    gainCoin(b);
+    return;
+  }
+
+  if (b.type === 'gun') {
+    b.alive = false;
+    gunActive = true; gunTimer = 600; // 10 sec
+    addEffect(b.x+b.w/2, b.y+b.h/2, '🔫 GUN!', '#76FF03', 16);
+    spawnParticles(b.x+b.w/2, b.y+b.h/2, '#76FF03', 10);
+    gainCoin(b);
+    return;
+  }
+
+  // Normal block
+  b.alive = false;
+  spawnParticles(b.x+b.w/2, b.y+b.h/2, b.color, 8);
+  gainCoin(b);
+}
+
+function breakSurrounding(row, col) {
+  const dirs = [[0,-1],[0,1],[-1,0],[1,0]];
+  dirs.forEach(([dr,dc]) => {
+    const target = blocks.find(b => b.row===row+dr && b.col===col+dc && b.alive);
+    if (target) {
+      target.alive = false;
+      spawnParticles(target.x+target.w/2, target.y+target.h/2, target.color, 6);
+      gainCoin(target);
+    }
+  });
+}
+
+function gainCoin(b) {
+  const c = b.type === 'normal' ? 10 : b.type === 'ice' ? 20 : b.type === 'fire' ? 30 : 25;
+  coins += c; score += c;
+  updateUI();
+  addEffect(b.x+b.w/2, b.y, `+${c}`, '#FFD700', 40);
+}
+
+function spawnBomb() {
+  const x = 20 + Math.random() * (CW - 40);
+  bombs.push({ x, y: -20, timer: 1200 });
+  addEffect(x, 30, '💣 BOMB!', '#FF4444', 80);
+}
+
+function addEffect(x, y, text, color, size=15) {
+  effects.push({ x, y, text, color, size, life: 80, maxLife: 80 });
+}
+
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1 + Math.random() * 4;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle)*speed, vy: Math.sin(angle)*speed - 2,
+      color, life: 30 + Math.random()*30, r: 2+Math.random()*3
+    });
+  }
+}
+
+function endGame() {
+  running = false;
+  overlay.style.display = 'flex';
+  overlay.innerHTML = `
+    <h1>💀 Game Over</h1>
+    <p class="big">💰 Coins: ${coins}</p>
+    <p>🏆 Score: ${score}<br>⭐ Level: ${level}</p>
+    <button id="startBtn" onclick="startGame()">🔄 Phir Khelo</button>
+  `;
+}
+
+// ── DRAW ──
+function draw() {
+  ctx.fillStyle = '#0a0a1e';
+  ctx.fillRect(0, 0, CW, CH);
+
+  // Stars
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  for (let i = 0; i < 60; i++) {
+    ctx.fillRect((i*79+i*13)%CW, (i*137+i*11)%CH, 1, 1);
+  }
+
+  // Blocks
+  blocks.forEach(b => { if (b.alive) drawBlock(b); });
+
+  // Bullets
+  ctx.fillStyle = '#76FF03';
+  bullets.forEach(bu => {
+    ctx.beginPath();
+    ctx.arc(bu.x, bu.y, 4, 0, Math.PI*2);
+    ctx.fill();
+    // Glow
+    ctx.shadowBlur = 8; ctx.shadowColor = '#76FF03';
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  });
+
+  // Bombs
+  bombs.forEach(bo => {
+    ctx.font = '24px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('💣', bo.x, bo.y);
+    // Warning ring
+    ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(bo.x, bo.y, 18, 0, Math.PI*2);
+    ctx.stroke();
+  });
+
+  // Ball
+  drawBall();
+
+  // Slider
+  drawSlider();
+
+  // Particles
+  particles.forEach(p => {
+    const a = p.life / 60;
+    ctx.globalAlpha = Math.min(1, a);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  // Effects
+  effects.forEach(ef => {
+    const a = ef.life / ef.maxLife;
+    ctx.globalAlpha = a;
+    ctx.font = `bold ${ef.size}px Arial`;
+    ctx.fillStyle = ef.color;
+    ctx.textAlign = 'center';
+    ctx.shadowBlur = 10; ctx.shadowColor = ef.color;
+    ctx.fillText(ef.text, ef.x, ef.y - (ef.maxLife - ef.life) * 0.4);
+    ctx.shadowBlur = 0;
+  });
+  ctx.globalAlpha = 1;
+
+  // Gun indicator
+  if (gunActive) {
+    ctx.fillStyle = '#76FF03';
+    ctx.font = 'bold 12px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(`🔫 ${Math.ceil(gunTimer/60)}s`, 6, CH - 10);
+  }
+
+  // Fire indicator
+  if (ball.fire) {
+    ctx.fillStyle = '#FF6F00';
+    ctx.font = 'bold 12px Arial';
+    ctx.textAlign = 'right';
+    ctx.fillText(`🔥 ${Math.ceil(ball.fireTimer/60)}s`, CW-6, CH-10);
+  }
+}
+
+function drawBlock(b) {
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.fillRect(b.x+3, b.y+3, b.w, b.h);
+
+  // Body
+  ctx.fillStyle = b.color;
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+
+  // Shine
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.fillRect(b.x+2, b.y+2, b.w-4, 4);
+
+  // Type icon
+  ctx.font = '14px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (b.type === 'fire') ctx.fillText('🔥', b.x+b.w/2, b.y+b.h/2);
+  else if (b.type === 'ice') ctx.fillText('🧊', b.x+b.w/2, b.y+b.h/2);
+  else if (b.type === 'gun') ctx.fillText('🔫', b.x+b.w/2, b.y+b.h/2);
+
+  // Ice crack overlay
+  if (b.cracked) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(b.x+b.w*0.3, b.y); ctx.lineTo(b.x+b.w*0.5, b.y+b.h*0.6);
+    ctx.lineTo(b.x+b.w*0.7, b.y+b.h); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(b.x+b.w*0.5, b.y+b.h*0.3); ctx.lineTo(b.x+b.w*0.2, b.y+b.h*0.7); ctx.stroke();
+  }
+
+  // Border
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(b.x, b.y, b.w, b.h);
+}
+
+function drawBall() {
+  const bx = ball.x, by = ball.y, br = ball.r;
+
+  if (ball.fire) {
+    // Fire glow
+    const gf = ctx.createRadialGradient(bx, by, 0, bx, by, br*3);
+    gf.addColorStop(0, 'rgba(255,120,0,0.5)');
+    gf.addColorStop(1, 'rgba(255,0,0,0)');
+    ctx.fillStyle = gf;
+    ctx.beginPath(); ctx.arc(bx, by, br*3, 0, Math.PI*2); ctx.fill();
+  } else {
+    // Normal glow
+    const gn = ctx.createRadialGradient(bx, by, 0, bx, by, br*2);
+    gn.addColorStop(0, 'rgba(200,200,255,0.3)');
+    gn.addColorStop(1, 'rgba(100,100,255,0)');
+    ctx.fillStyle = gn;
+    ctx.beginPath(); ctx.arc(bx, by, br*2, 0, Math.PI*2); ctx.fill();
+  }
+
+  // Ball body
+  const gb = ctx.createRadialGradient(bx-3, by-3, 1, bx, by, br);
+  if (ball.fire) {
+    gb.addColorStop(0, '#FFFF80');
+    gb.addColorStop(0.5, '#FF6000');
+    gb.addColorStop(1, '#AA0000');
+  } else {
+    gb.addColorStop(0, '#FFFFFF');
+    gb.addColorStop(0.5, '#88AAFF');
+    gb.addColorStop(1, '#2244CC');
+  }
+  ctx.fillStyle = gb;
+  ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI*2); ctx.fill();
+}
+
+function drawSlider() {
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath();
+  ctx.roundRect(sliderX+4, SY+4, SW, SH, 8);
+  ctx.fill();
+
+  // Body
+  const sg = ctx.createLinearGradient(sliderX, SY, sliderX+SW, SY+SH);
+  if (gunActive) {
+    sg.addColorStop(0, '#33AA00');
+    sg.addColorStop(1, '#006600');
+  } else {
+    sg.addColorStop(0, '#AA00FF');
+    sg.addColorStop(1, '#5000CC');
+  }
+  ctx.fillStyle = sg;
+  ctx.beginPath(); ctx.roundRect(sliderX, SY, SW, SH, 8); ctx.fill();
+
+  // Gun barrels on slider
+  if (gunActive) {
+    ctx.fillStyle = '#00FF00';
+    ctx.fillRect(sliderX + SW*0.2, SY-8, 6, 10);
+    ctx.fillRect(sliderX + SW*0.75, SY-8, 6, 10);
+    ctx.fillStyle = '#003300';
+    ctx.fillRect(sliderX + SW*0.2+1, SY-8, 4, 8);
+    ctx.fillRect(sliderX + SW*0.75+1, SY-8, 4, 8);
+  }
+
+  // Shine
+  ctx.fillStyle = 'rgba(255,255,255,0.2)';
+  ctx.beginPath(); ctx.roundRect(sliderX+6, SY+2, SW-12, 4, 3); ctx.fill();
+
+  // Border
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.roundRect(sliderX, SY, SW, SH, 8); ctx.stroke();
+}
+
+// Initial draw
+draw();
+</script>
+</body>
+</html>
